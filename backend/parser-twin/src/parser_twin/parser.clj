@@ -4,7 +4,8 @@
             [clojure.java.io :as io]
             [clojure.core.async :as async]
             [jsonista.core :as j]
-            [ring.websocket :as ws])
+            [ring.websocket :as ws]
+            [clojure.string :as string])
   (:import (java.io File)
            (org.antlr.v4 Tool)
            (org.antlr.v4.tool ANTLRToolListener ANTLRMessage)
@@ -16,7 +17,7 @@
            (java.io File Reader InputStream)
            (org.stringtemplate.v4 ST)
            (org.antlr.v4.runtime.tree ParseTreeListener)
-           (javax.tools ToolProvider StandardJavaFileManager)))
+           (javax.tools ToolProvider)))
 
 (set! *warn-on-reflection* true)
 
@@ -40,7 +41,7 @@
         msg-st (.getMessageTemplate err-mgr msg)
         output-msg (.render msg-st)]
     (if (.formatWantsSingleLineMessage err-mgr)
-      (clojure.string/replace output-msg #"\n" " ")
+      (string/replace output-msg #"\n" " ")
       output-msg)))
 
 (defn- ^Tool process-antlr-tool [options]
@@ -145,7 +146,7 @@
                     (do
                       (register-lang grammar target-path package)
                       {:code 200
-                       :body (j/write-value-as-string {:uid grammar})})
+                       :body (j/write-value-as-string {:lang grammar})})
                     {:code 500})))))
         {:code 400 :body absent-grammar-files-message})
       (finally
@@ -342,7 +343,7 @@
                :processed true}
               (make-step)
               (async/>!! chan))
-         (swap! current-nodes rest)
+         (swap! current-nodes pop)
          (swap! timer parent-timer)
          (start-timer @timer))
        (visitTerminal [^TerminalNode node]
@@ -352,21 +353,90 @@
     ;; async parser
     (run-parser parse-fn chan)))
 
-(defonce channels {})
+(defonce channels (atom {}))
+
+(defn- ws-send-json [socket data & args]
+  (apply ws/send socket (j/write-value-as-string data) args))
+
+(defmulti process-event (fn [event & args] (:type event)))
+
+(defn- validate-event [event required-keys socket]
+  (if-let [missing-keys
+           (->>
+            (remove #(contains? event %) required-keys)
+            (seq))]
+    (do
+      (ws-send-json
+       socket
+       {:type "error"
+        :message (str "Missing required params: "
+                      (string/join \, (map name missing-keys)))})
+      nil)
+    event))
+
+(defmethod process-event "init"
+  [{:keys [lang rule source] :as event} socket channel]
+  (when (validate-event event [:lang :rule :source] socket)
+    (let [uuid (str (random-uuid))
+          chan (parse-source lang rule source)]
+      (swap! channels assoc uuid chan)
+      (reset! channel chan)
+      (ws-send-json socket {:uuid uuid}))))
+
+(defmethod process-event "set"
+  [{:keys [uuid] :as event} socket channel]
+  (when (validate-event event [:uuid] socket)
+    (if-let [chan (@channels uuid)]
+      (do
+        (reset! channel chan)
+        (ws-send-json socket {:uuid uuid}))
+      (ws-send-json
+       socket
+       {:type "error"
+        :message "Missing parser"}))))
+
+(def ^:private step-common-params [:type :description :count])
+
+(defmethod process-event "step"
+  [{:keys [type description count id] :as event} socket channel]
+  (let [[required-params pred]
+        (case description
+          "simple" [step-common-params (constantly true)]
+          "token" [step-common-params (comp #{:terminalNode :errorNode} :type)]
+          "complete" [(conj step-common-params :id)
+                      (every-pred (comp #{id} :id) :processed)])]
+    (when (validate-event event required-params socket)
+      (loop [left count]
+        (if (zero? left)
+          (ws-send-json socket {:type "stepEnd"})
+          (if-let [value (async/<!! @channel)]
+            (do
+              (ws-send-json socket value)
+              (recur (cond-> left (pred value) dec)))
+            (ws-send-json socket {:type "parserEnd"})))))))
+
+(defmethod process-event "exit"
+  [event socket channel]
+  (ws/close socket))
 
 (defn handle-parse-req [req]
   (assert (ws/upgrade-request? req))
-  (let [counter (atom 0)]
+  (let [curr-channel (atom nil)]
     {::ws/listener
      {:on-open
       (fn [socket]
         (ws/send socket "Connected!"))
       :on-message
       (fn [socket event]
-        (cond
-          (= event "exit")
-          (ws/close socket)
-          (= event "inc")
-          (ws/send socket (str (swap! counter inc)))
-          :else (ws/send socket event)))}}))
+        (println "event -> " event)
+        (try
+          (when-let [event
+                     (-> event
+                         j/read-value
+                         (update-keys keyword)
+                         (validate-event [:type] socket))]
+            (process-event event socket curr-channel))
+          (catch Exception e
+            (println "Error in socket.\n" e)
+            (ws-send-json socket {:type "error" :message "Internal Error"}))))}}))
 
