@@ -5,8 +5,10 @@
             [clojure.core.async :as async]
             [jsonista.core :as j]
             [ring.websocket :as ws]
-            [clojure.string :as string])
-  (:import (java.io File)
+            [clojure.string :as string]
+            [clojure.stacktrace :as stacktrace])
+  (:import (java.io File Reader InputStream)
+           (java.util Map HashMap)
            (org.antlr.v4 Tool)
            (org.antlr.v4.tool ANTLRToolListener ANTLRMessage)
            (org.antlr.v4.runtime CharStream CharStreams CommonTokenStream Token Lexer
@@ -14,7 +16,6 @@
                                  Recognizer CommonToken)
            (java.nio.file Path)
            (org.antlr.v4.runtime.tree TerminalNode ErrorNode)
-           (java.io File Reader InputStream)
            (org.stringtemplate.v4 ST)
            (org.antlr.v4.runtime.tree ParseTreeListener)
            (javax.tools ToolProvider)))
@@ -74,6 +75,58 @@
            ;; (io/delete-file tempfile)
            (assoc spec :tempfile new-tempfile)))]))
 
+(defn- timed-lexer-class-impl [package lexer-class]
+  (let [timed-lexer-class (str lexer-class "Timed")]
+    {:code
+     (format
+      "
+package %s;
+
+import org.antlr.v4.runtime.Token;
+import org.antlr.v4.runtime.CharStream;
+import java.util.Map;
+
+public class %s extends %s {
+  private Map<Token, Long> durations;
+  public %s(CharStream input, Map<Token, Long> durations) {
+    super(input);
+    this.durations = durations;
+  }
+
+  @Override
+  public Token nextToken() {
+    long start = System.nanoTime();
+    Token token = super.nextToken();
+    long duration = System.nanoTime() - start;
+
+    this.durations.put(token, duration);
+
+    return token;
+  }
+}"
+      package timed-lexer-class lexer-class timed-lexer-class)
+     :lexer-class timed-lexer-class}))
+
+(defn- prepare-java-files [^File target-dir package]
+  (let [{:keys [parser-class lexer-class]}
+        (into {}
+              (for [^File file (fs/list-dir target-dir)
+                    :let [[^String fname ext] (fs/split-ext (.getName file))]
+                    :when (= ext ".java")]
+                (cond
+                  (.endsWith fname "Parser") [:parser-class fname]
+                  (.endsWith fname "Lexer") [:lexer-class fname])))]
+    (assert lexer-class)
+    (assert parser-class)
+    (let [{:keys [code lexer-class]} (timed-lexer-class-impl package lexer-class)]
+      ;; generate timed lexer class
+      (io/copy
+       code
+       (File. target-dir (str lexer-class ".java")))
+      ;; return parser and lexer classes
+      {:lexer-class (str package "." lexer-class)
+       :parser-class (str package "." parser-class)})))
+
 (defn compile-java-files [files]
   (->>
    (map #(.getPath ^File %) files)
@@ -92,36 +145,29 @@
 (defn class-array [seq]
   (into-array Class seq))
 
-(defn- register-lang-helper [lang-name ^Class lexer-class ^Class parser-class]
-  (let [lang-name (name lang-name)]
-    (let [lexer-cnstr (.getDeclaredConstructor lexer-class (class-array [CharStream]))
-          parser-cnstr (.getDeclaredConstructor parser-class (class-array [TokenStream]))
-          rule-names (-> (.getField parser-class "ruleNames") (.get nil))]
-      (->>
-       (for [rule-name rule-names
-             :let [method (.getMethod parser-class rule-name (class-array []))]]
-         [rule-name (fn [parser] (.invoke method parser (object-array [])))])
-       (into {})
-       (hash-map :make-lexer (fn [stream] (.newInstance lexer-cnstr (object-array [stream])))
-                 :make-parser (fn [tokens] (.newInstance parser-cnstr (object-array [tokens])))
-                 :rule-parse-fn)
-       (swap! languages assoc lang-name)))))
+(defn- register-lang [^String lang ^String lexer-class ^String parser-class]
+  (let [lexer-class (Class/forName lexer-class)
+        parser-class (Class/forName parser-class)
+        lexer-cnstr (.getDeclaredConstructor lexer-class (class-array [CharStream Map]))
+        parser-cnstr (.getDeclaredConstructor parser-class (class-array [TokenStream]))
+        rule-names (-> (.getField parser-class "ruleNames") (.get nil))]
+    (->>
+     (for [rule-name rule-names
+           :let [method (.getMethod parser-class rule-name (class-array []))]]
+       [rule-name (fn [parser] (.invoke method parser (object-array [])))])
+     (into {})
+     (hash-map
+      :make-lexer (fn [stream durations]
+                    (.newInstance lexer-cnstr (object-array [stream durations])))
+      :make-parser (fn [tokens]
+                     (.newInstance parser-cnstr (object-array [tokens])))
+      :rule-parse-fn)
+     (swap! languages assoc lang))))
 
-(defn- register-lang [grammar ^File target-dir package]
-  (let [{:keys [parser-class lexer-class]}
-        (into {}
-              (for [^File file (fs/list-dir target-dir)
-                    :let [[^String fname ext] (fs/split-ext (.getName file))]
-                    :when (= ext ".java")]
-                (cond
-                  (.endsWith fname "Parser")
-                  [:parser-class (str package "." fname)]
-                  (.endsWith fname "Lexer")
-                  [:lexer-class (str package "." fname)])))]
-    (assert lexer-class)
-    (assert parser-class)
-    (register-lang-helper
-     grammar (Class/forName lexer-class) (Class/forName parser-class))))
+(comment
+  (generate-parser
+   [{:filename "test.g4"
+     :tempfile (java.io.File. "resources/grammars/test/test.g4")}]))
 
 (defn generate-parser
   [files]
@@ -142,12 +188,14 @@
             (if (> (count (:errors status-map)) 0)
               {:code 400 :body (j/write-value-as-string status-map)}
               (do (try-copy-additional-java-files files target-path package)
-                  (if (compile-java-files (fs/list-dir target-path))
-                    (do
-                      (register-lang grammar target-path package)
-                      {:code 200
-                       :body (j/write-value-as-string {:lang grammar})})
-                    {:code 500})))))
+                  (let [{:keys [lexer-class parser-class]}
+                        (prepare-java-files target-path package)]
+                    (if (compile-java-files (fs/list-dir target-path))
+                      (do
+                        (register-lang grammar lexer-class parser-class)
+                        {:code 200
+                         :body (j/write-value-as-string {:lang grammar})})
+                      {:code 500}))))))
         {:code 400 :body absent-grammar-files-message})
       (finally
         (fs/delete-dir tmp-dir)))))
@@ -175,12 +223,16 @@
 (defn init-parser [lang rule source]
   (let [lang (name lang)]
     (if-let [{:keys [make-lexer make-parser rule-parse-fn]} (@languages lang)]
-      (let [lexer (-> source make-stream make-lexer)
+      (let [token-durations (HashMap.)
+            lexer (-> source make-stream (make-lexer token-durations))
             tokens (CommonTokenStream. lexer)
             parser (make-parser tokens)
             rule-name (name rule)]
         (if-let [parse-fn (rule-parse-fn rule-name)]
-          [lexer parser (partial parse-fn parser)]
+          {:lexer lexer
+           :parser parser
+           :parse-fn (partial parse-fn parser)
+           :token-durations token-durations}
           (throw (IllegalArgumentException.
                   (str "Invalid rule name - " rule-name ".")))))
       (throw (IllegalArgumentException.
@@ -236,14 +288,15 @@
     (fn [& {:as props}]
       (assoc props id-col (swap! counter inc)))))
 
-(defn- init-context []
+(defn- init-context [& {:keys [token-durations]}]
   (let [current-nodes (atom nil)]
     {:timer (atom nop-timer)
      :make-node (with-id-generator :id)
      :make-step (with-id-generator :step)
      :current-nodes current-nodes
      :current-node-id (fn [] (:id (first @current-nodes)))
-     :chan (async/chan)}))
+     :chan (async/chan)
+     :token-durations token-durations}))
 
 (defn- lexer-error-span [^Lexer lexer & args]
   {:startIndex (._tokenStartCharIndex lexer)
@@ -286,7 +339,7 @@
 
 (defn- visit-terminal
   [lexer ^TerminalNode node target-type
-   & {:keys [make-node make-step timer chan current-node-id]}]
+   & {:keys [make-node make-step timer chan current-node-id ^Map token-durations]}]
   (stop-timer @timer)
   (let [token (.getSymbol node)]
     (->>
@@ -296,7 +349,8 @@
       :name (token-name token lexer)
       :value (.getText token)
       :startIndex (.getStartIndex token)
-      :stopIndex (.getStopIndex token))
+      :stopIndex (.getStopIndex token)
+      :elapsedTime (.get token-durations token))
      (make-step)
      (async/>!! chan)))
   (start-timer @timer))
@@ -312,11 +366,11 @@
   chan)
 
 (defn parse-source [lang rule source]
-  (let [[^Lexer lexer ^Parser parser parse-fn]
+  (let [{:keys [^Lexer lexer ^Parser parser parse-fn] :as props}
         (init-parser lang rule source)
         {:keys [timer make-node make-step current-nodes current-node-id chan]
          :as context}
-        (init-context)]
+        (init-context props)]
     ;; configurate error listeners
     (configurate-error-listener lexer :lexerError context)
     (configurate-error-listener parser :parserError context)
@@ -419,13 +473,25 @@
   [event socket channel]
   (ws/close socket))
 
+(defn- make-pinger [socket]
+  (doto
+      (Thread.
+       (fn []
+         (while (ws/open? socket)
+           (ws/ping socket)
+           ;; 5 secs
+           (Thread/sleep (* 1000 5)))))
+    (.start)))
+
 (defn handle-parse-req [req]
   (assert (ws/upgrade-request? req))
-  (let [curr-channel (atom nil)]
+  (let [curr-channel (atom nil)
+        pinger (atom nil)]
     {::ws/listener
      {:on-open
       (fn [socket]
-        (ws/send socket "Connected!"))
+        (ws/send socket "Socket opened!")
+        (reset! pinger (make-pinger socket)))
       :on-message
       (fn [socket event]
         (println "event -> " event)
@@ -437,6 +503,18 @@
                          (validate-event [:type] socket))]
             (process-event event socket curr-channel))
           (catch Exception e
-            (println "Error in socket.\n" e)
-            (ws-send-json socket {:type "error" :message "Internal Error"}))))}}))
+            (println "Error in socket.\n")
+            (stacktrace/print-stack-trace e 10)
+            (flush)
+            (ws-send-json socket {:type "error" :message "Internal Error"}))))
+      :on-close
+      (fn [socket]
+        (println "Socket closed!")
+        (.stop ^Thread @pinger))
+      :on-pong
+      (fn [socket data]
+        (println "Pong received!"))}}))
 
+(comment
+  (compile-java-files
+   (fs/list-dir "generated/parser1746822544685")))
