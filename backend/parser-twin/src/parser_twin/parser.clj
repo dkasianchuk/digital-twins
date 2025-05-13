@@ -459,15 +459,16 @@ public class %s extends %s {
           "token" [step-common-params (comp #{:terminalNode :errorNode} :type)]
           "complete" [(conj step-common-params :id)
                       (every-pred (comp #{id} :id) :processed)])]
-    (when (validate-event event required-params socket)
-      (loop [left count]
-        (if (zero? left)
-          (ws-send-json socket {:type "stepEnd"})
-          (if-let [value (async/<!! @channel)]
-            (do
-              (ws-send-json socket value)
-              (recur (cond-> left (pred value) dec)))
-            (ws-send-json socket {:type "parserEnd"})))))))
+    (locking @channel
+      (when (validate-event event required-params socket)
+        (loop [left count]
+          (if (zero? left)
+            (ws-send-json socket {:type "stepEnd"})
+            (if-let [value (async/<!! @channel)]
+              (do
+                (ws-send-json socket value)
+                (recur (cond-> left (pred value) dec)))
+              (ws-send-json socket {:type "end"}))))))))
 
 (defmethod process-event "exit"
   [event socket channel]
@@ -490,7 +491,7 @@ public class %s extends %s {
     {::ws/listener
      {:on-open
       (fn [socket]
-        (ws/send socket "Socket opened!")
+        (println "Socket opened!")
         (reset! pinger (make-pinger socket)))
       :on-message
       (fn [socket event]
@@ -510,10 +511,7 @@ public class %s extends %s {
       :on-close
       (fn [socket]
         (println "Socket closed!")
-        (.stop ^Thread @pinger))
-      :on-pong
-      (fn [socket data]
-        (println "Pong received!"))}}))
+        (.stop ^Thread @pinger))}}))
 
 (comment
   (compile-java-files
