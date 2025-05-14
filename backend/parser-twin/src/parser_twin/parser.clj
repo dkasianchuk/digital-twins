@@ -350,7 +350,8 @@ public class %s extends %s {
       :value (.getText token)
       :startIndex (.getStartIndex token)
       :stopIndex (.getStopIndex token)
-      :elapsedTime (.get token-durations token))
+      :elapsedTime (.get token-durations token)
+      :processed true)
      (make-step)
      (async/>!! chan)))
   (start-timer @timer))
@@ -449,26 +450,31 @@ public class %s extends %s {
        {:type "error"
         :message "Missing parser"}))))
 
-(def ^:private step-common-params [:type :description :count])
+(defn- step-helper [pred count channel socket]
+  (locking @channel
+    (loop [left count]
+      (if (zero? left)
+        (ws-send-json socket {:type "stepEnd"})
+        (if-let [value (async/<!! @channel)]
+          (do
+            (ws-send-json socket value)
+            (recur (cond-> left (pred value) dec)))
+          (ws-send-json socket {:type "end"}))))))
 
-(defmethod process-event "step"
-  [{:keys [type description count id] :as event} socket channel]
-  (let [[required-params pred]
-        (case description
-          "simple" [step-common-params (constantly true)]
-          "token" [step-common-params (comp #{:terminalNode :errorNode} :type)]
-          "complete" [(conj step-common-params :id)
-                      (every-pred (comp #{id} :id) :processed)])]
-    (locking @channel
-      (when (validate-event event required-params socket)
-        (loop [left count]
-          (if (zero? left)
-            (ws-send-json socket {:type "stepEnd"})
-            (if-let [value (async/<!! @channel)]
-              (do
-                (ws-send-json socket value)
-                (recur (cond-> left (pred value) dec)))
-              (ws-send-json socket {:type "end"}))))))))
+(defmethod process-event "simpleStep"
+  [{:keys [count] :as event} socket channel]
+  (when (validate-event event [:count] socket)
+    (step-helper (constantly true) count channel socket)))
+
+(defmethod process-event "tokenStep"
+  [{:keys [count] :as event} socket channel]
+  (when (validate-event event [:count] socket)
+    (step-helper (comp #{:terminalNode :errorNode} :type) count channel socket)))
+
+(defmethod process-event "completeNodeStep"
+  [{:keys [id] :as event} socket channel]
+  (when (validate-event event [:id] socket)
+    (step-helper (every-pred :processed (comp #{id} :id)) 1 channel socket)))
 
 (defmethod process-event "exit"
   [event socket channel]
