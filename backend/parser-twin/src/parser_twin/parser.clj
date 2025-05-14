@@ -450,31 +450,37 @@ public class %s extends %s {
        {:type "error"
         :message "Missing parser"}))))
 
-(defn- step-helper [pred count channel socket]
-  (locking @channel
-    (loop [left count]
-      (if (zero? left)
-        (ws-send-json socket {:type "stepEnd"})
-        (if-let [value (async/<!! @channel)]
-          (do
-            (ws-send-json socket value)
-            (recur (cond-> left (pred value) dec)))
-          (ws-send-json socket {:type "end"}))))))
+(defn- step-helper [pred count timeout channel socket]
+  (let [sleep-fn
+        (if timeout
+          #(Thread/sleep ^long timeout)
+          (constantly nil))]
+    (locking @channel
+      (loop [left count]
+        (if (zero? left)
+          (ws-send-json socket {:type "stepEnd"})
+          (if-let [value (async/<!! @channel)]
+            (do
+              (ws-send-json socket value)
+              (sleep-fn)
+              (recur (cond-> left (pred value) dec)))
+            (ws-send-json socket {:type "end"})))))))
 
 (defmethod process-event "simpleStep"
-  [{:keys [count] :as event} socket channel]
+  [{:keys [count timeout] :as event} socket channel]
   (when (validate-event event [:count] socket)
-    (step-helper (constantly true) count channel socket)))
+    (step-helper (constantly true) count timeout channel socket)))
 
 (defmethod process-event "tokenStep"
-  [{:keys [count] :as event} socket channel]
+  [{:keys [count timeout] :as event} socket channel]
   (when (validate-event event [:count] socket)
-    (step-helper (comp #{:terminalNode :errorNode} :type) count channel socket)))
+    (step-helper
+     (comp #{:terminalNode :errorNode} :type) count timeout channel socket)))
 
 (defmethod process-event "completeNodeStep"
-  [{:keys [id] :as event} socket channel]
+  [{:keys [id timeout] :as event} socket channel]
   (when (validate-event event [:id] socket)
-    (step-helper (every-pred :processed (comp #{id} :id)) 1 channel socket)))
+    (step-helper (every-pred :processed (comp #{id} :id)) 1 timeout channel socket)))
 
 (defmethod process-event "exit"
   [event socket channel]
