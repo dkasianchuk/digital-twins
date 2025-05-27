@@ -280,6 +280,13 @@ public class %s extends %s {
 (defn elapsed-time [{:keys [elapsed-time]}]
   @elapsed-time)
 
+(defn- nanos->timestamp [nanos]
+  (let [total-seconds (quot nanos 1000000000)
+        minutes (quot total-seconds 60)
+        seconds (mod total-seconds 60)
+        nano-frac (mod nanos 1000000000)]
+    (format "%02d:%02d.%09d" minutes seconds nano-frac)))
+
 (defn parent-timer [{:keys [parent]}]
   parent)
 
@@ -350,7 +357,7 @@ public class %s extends %s {
       :value (.getText token)
       :startIndex (.getStartIndex token)
       :stopIndex (.getStopIndex token)
-      :elapsedTime (.get token-durations token)
+      :elapsedTime (nanos->timestamp (.get token-durations token))
       :processed true)
      (make-step)
      (async/>!! chan)))
@@ -394,7 +401,7 @@ public class %s extends %s {
        (exitEveryRule [ctx]
          (stop-timer @timer)
          (->> {:id (current-node-id)
-               :elapsedTime (elapsed-time @timer)
+               :elapsedTime (nanos->timestamp (elapsed-time @timer))
                :processed true}
               (make-step)
               (async/>!! chan))

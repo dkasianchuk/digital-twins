@@ -12,7 +12,7 @@
                  [ring/ring-core "1.14.1"]
                  [ring/ring-jetty-adapter "1.14.1"]
                  [metosin/reitit "0.8.0"]]
-  :main ^:skip-aot parser-twin.core
+  :main ^:skip-aot parser-twin.api
   :target-path "target/%s"
   :profiles {:uberjar {:aot :all}}
   :source-paths ["src"])
