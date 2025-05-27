@@ -1,0 +1,183 @@
+[ {
+    "type" : "node",
+    "parent" : null,
+    "value" : "prog",
+    "processed" : false,
+    "id" : 1,
+    "step" : 1
+  }, {
+    "type" : "node",
+    "parent" : 1,
+    "value" : "stmt",
+    "processed" : false,
+    "id" : 2,
+    "step" : 2
+  }, {
+    "type" : "node",
+    "parent" : 2,
+    "value" : "acstmt",
+    "processed" : false,
+    "id" : 3,
+    "step" : 3
+  }, {
+    "type" : "terminalNode",
+    "parent" : 3,
+    "name" : "A",
+    "value" : "a",
+    "startIndex" : 0,
+    "stopIndex" : 0,
+    "id" : 4,
+    "step" : 4
+  }, {
+    "type" : "terminalNode",
+    "parent" : 3,
+    "name" : "C",
+    "value" : "c",
+    "startIndex" : 2,
+    "stopIndex" : 2,
+    "id" : 5,
+    "step" : 5
+  }, {
+    "type" : "terminalNode",
+    "parent" : 3,
+    "name" : "SEMI",
+    "value" : ";",
+    "startIndex" : 3,
+    "stopIndex" : 3,
+    "id" : 6,
+    "step" : 6
+  }, {
+    "id" : 3,
+    "elapsedTime" : 59541,
+    "processed" : true,
+    "step" : 7
+  }, {
+    "id" : 2,
+    "elapsedTime" : 102692,
+    "processed" : true,
+    "step" : 8
+  }, {
+    "type" : "node",
+    "parent" : 1,
+    "value" : "stmt",
+    "processed" : false,
+    "id" : 7,
+    "step" : 9
+  }, {
+    "startIndex" : 7,
+    "stopIndex" : 7,
+    "type" : "lexerError",
+    "parent" : 7,
+    "message" : "token recognition error at: 'd'",
+    "id" : 8,
+    "step" : 10
+  }, {
+    "startIndex" : 5,
+    "stopIndex" : 8,
+    "type" : "parserError",
+    "parent" : 7,
+    "message" : "no viable alternative at input 'a;'",
+    "id" : 9,
+    "step" : 11
+  }, {
+    "id" : 7,
+    "elapsedTime" : 172133,
+    "processed" : true,
+    "step" : 12
+  }, {
+    "type" : "node",
+    "parent" : 1,
+    "value" : "stmt",
+    "processed" : false,
+    "id" : 10,
+    "step" : 13
+  }, {
+    "type" : "errorNode",
+    "parent" : 10,
+    "name" : "A",
+    "value" : "a",
+    "startIndex" : 5,
+    "stopIndex" : 5,
+    "id" : 11,
+    "step" : 14
+  }, {
+    "type" : "errorNode",
+    "parent" : 10,
+    "name" : "SEMI",
+    "value" : ";",
+    "startIndex" : 8,
+    "stopIndex" : 8,
+    "id" : 12,
+    "step" : 15
+  }, {
+    "id" : 10,
+    "elapsedTime" : 83867,
+    "processed" : true,
+    "step" : 16
+  }, {
+    "type" : "node",
+    "parent" : 1,
+    "value" : "stmt",
+    "processed" : false,
+    "id" : 13,
+    "step" : 17
+  }, {
+    "type" : "node",
+    "parent" : 13,
+    "value" : "abstmt",
+    "processed" : false,
+    "id" : 14,
+    "step" : 18
+  }, {
+    "type" : "terminalNode",
+    "parent" : 14,
+    "name" : "A",
+    "value" : "a",
+    "startIndex" : 10,
+    "stopIndex" : 10,
+    "id" : 15,
+    "step" : 19
+  }, {
+    "type" : "terminalNode",
+    "parent" : 14,
+    "name" : "B",
+    "value" : "b",
+    "startIndex" : 12,
+    "stopIndex" : 12,
+    "id" : 16,
+    "step" : 20
+  }, {
+    "type" : "terminalNode",
+    "parent" : 14,
+    "name" : "SEMI",
+    "value" : ";",
+    "startIndex" : 13,
+    "stopIndex" : 13,
+    "id" : 17,
+    "step" : 21
+  }, {
+    "id" : 14,
+    "elapsedTime" : 44434,
+    "processed" : true,
+    "step" : 22
+  }, {
+    "id" : 13,
+    "elapsedTime" : 63710,
+    "processed" : true,
+    "step" : 23
+  }, {
+    "type" : "terminalNode",
+    "parent" : 1,
+    "name" : "EOF",
+    "value" : "<EOF>",
+    "startIndex" : 14,
+    "stopIndex" : 13,
+    "id" : 18,
+    "step" : 24
+  }, {
+    "id" : 1,
+    "elapsedTime" : 490999,
+    "processed" : true,
+    "step" : 25
+  } ]
+  
