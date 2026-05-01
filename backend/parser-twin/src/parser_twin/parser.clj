@@ -532,6 +532,31 @@ public class %s extends %s {
         (println "Socket closed!")
         (.stop ^Thread @pinger))}}))
 
+(declare make-node)
+
+(defn chan-from-events [events]
+  (let [chan (async/chan)]
+    (future
+      (doseq [event events]
+        (println "event->" event)
+        (async/>!! chan event)))
+    chan))
+
+(defn make-children [chan]
+  (lazy-seq
+   (let [event (async/<!! chan)]
+     (when-not (= (:type event) :exitRule)
+       (cons (make-node chan event) (make-children chan))))))
+
+(defn make-node
+  ([chan]
+   (make-node chan (async/<!! chan)))
+  ([chan event]
+   (case (:type event)
+     :enterRule (cons (:ruleName event) (make-children chan))
+     :visitTerminal event
+     :visitErrorNode event)))
+
 (comment
   (compile-java-files
    (fs/list-dir "generated/parser1746822544685")))
