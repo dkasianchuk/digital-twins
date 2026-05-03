@@ -557,6 +557,103 @@ public class %s extends %s {
      :visitTerminal event
      :visitErrorNode event)))
 
+(defn make-test-listener
+  [events
+   & {:keys [enter-rule
+             exit-rule
+             visit-terminal
+             visit-error-node]}]
+  (future
+    (doseq [{:keys [type] :as event} events]
+      (println "event->" event)
+      (case type
+        :enterRule (enter-rule event)
+        :exitRule (exit-rule event)
+        :visitTerminal (visit-terminal event)
+        :visitErrorNode (visit-error-node event)))))
+
+(defprotocol LazyNode
+  (force! [this]))
+
+(extend-protocol LazyNode
+  clojure.lang.ISeq
+  (force! [node]
+    (doseq [child (rest node)]
+      (force! child)))
+  java.lang.Object
+  (force! [node]
+    node))
+
+(defn constantly-nil []
+  nil)
+
+(defn make-children-fn
+  ([chan]
+   (make-children-fn chan constantly-nil))
+  ([chan pre-fn]
+   (lazy-seq
+    (pre-fn)
+    (let [node (async/<!! chan)]
+      (when-not (identical? node ::stop)
+        (cons node (make-children-fn chan (partial force! node))))))))
+
+(defn make-node-fn [chan event]
+  (cons (:ruleName event) (make-children-fn chan)))
+
+(defn make-test-parser
+  [events]
+  (let [chan (async/chan)]
+    ;; configurate listener
+    (make-test-listener
+     events
+     :enter-rule (fn [event] (async/>!! chan (make-node-fn chan event)))
+     :exit-rule (fn [event] (async/>!! chan ::stop))
+     :visit-terminal (fn [event] (async/>!! chan event))
+     :visit-error-node (fn [event] (async/>!! chan event)))
+    ;; return tree
+    (lazy-seq
+     (async/<!! chan))))
+
+(defn test-lazy-tree []
+  (let [events
+        [{:type :enterRule
+          :ruleName "*"}
+         {:type :enterRule
+          :ruleName "+"}
+         {:type :enterRule
+          :ruleName "+"}
+         {:type :visitTerminal
+          :value "a1"}
+         {:type :visitTerminal
+          :value "a2"}
+         {:type :exitRule}
+         {:type :enterRule
+          :ruleName "+"}
+         {:type :visitTerminal
+          :value "b1"}
+         {:type :visitTerminal
+          :value "b2"}
+         {:type :exitRule}
+         {:type :exitRule}
+         {:type :enterRule
+          :ruleName "-"}
+         {:type :visitTerminal
+          :value "c1"}
+         {:type :visitTerminal
+          :value "c2"}
+         {:type :exitRule}
+         {:type :enterRule
+          :ruleName "+"}
+         {:type :visitTerminal
+          :value "d1"}
+         {:type :visitTerminal
+          :value "d2"}
+         {:type :exitRule}
+         {:type :exitRule}]
+        tree (make-test-parser events)]
+    (println (str "second-> " (nth tree 2)))
+    tree))
+
 (comment
   (compile-java-files
    (fs/list-dir "generated/parser1746822544685")))
