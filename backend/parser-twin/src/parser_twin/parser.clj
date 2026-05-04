@@ -167,7 +167,10 @@ public class %s extends %s {
 (comment
   (generate-parser
    [{:filename "test.g4"
-     :tempfile (java.io.File. "resources/grammars/test/test.g4")}]))
+     :tempfile (java.io.File. "resources/grammars/test/test.g4")}])
+  (generate-parser
+   [{:filename "calculator.g4"
+     :tempfile (java.io.File. "resources/grammars/calculator/calculator.g4")}]))
 
 (defn generate-parser
   [files]
@@ -382,6 +385,8 @@ public class %s extends %s {
     ;; configurate error listeners
     (configurate-error-listener lexer :lexerError context)
     (configurate-error-listener parser :parserError context)
+    ;; do not build parse tree
+    (.setBuildParseTree parser false)
     ;; add parser listener
     (.addParseListener
      parser
@@ -572,34 +577,6 @@ public class %s extends %s {
         :visitTerminal (visit-terminal event)
         :visitErrorNode (visit-error-node event)))))
 
-(defprotocol LazyNode
-  (force! [this]))
-
-(extend-protocol LazyNode
-  clojure.lang.ISeq
-  (force! [node]
-    (doseq [child (rest node)]
-      (force! child)))
-  java.lang.Object
-  (force! [node]
-    node))
-
-(defn constantly-nil []
-  nil)
-
-(defn make-children-fn
-  ([chan]
-   (make-children-fn chan constantly-nil))
-  ([chan pre-fn]
-   (lazy-seq
-    (pre-fn)
-    (let [node (async/<!! chan)]
-      (when-not (identical? node ::stop)
-        (cons node (make-children-fn chan (partial force! node))))))))
-
-(defn make-node-fn [chan event]
-  (cons (:ruleName event) (make-children-fn chan)))
-
 (defn make-test-parser
   [events]
   (let [chan (async/chan)]
@@ -608,11 +585,124 @@ public class %s extends %s {
      events
      :enter-rule (fn [event] (async/>!! chan (make-node-fn chan event)))
      :exit-rule (fn [event] (async/>!! chan ::stop))
-     :visit-terminal (fn [event] (async/>!! chan event))
+     :visit-terminal (fn [event]
+                       (async/>!!
+                        chan
+                        (assoc event
+                               :span (atom
+                                      (select-keys event [:startIndex :stopIndex])))))
      :visit-error-node (fn [event] (async/>!! chan event)))
     ;; return tree
+    (async/<!! chan)))
+
+;; (defprotocol LazyNode
+;;   (force! [this])
+;;   (skip! [this]))
+
+;; (extend-protocol LazyNode
+;;   clojure.lang.ISeq
+;;   (force! [node]
+;;     (doseq [child (rest node)]
+;;       (force! child))
+;;     node)
+;;   java.lang.Object
+;;   (force! [node]
+;;     node))
+
+(defn force! [node]
+  (if-let [children (:children node)]
+    (do
+      (doseq [child children]
+        (force! child))
+      node)
+    node))
+
+(defn constantly-nil []
+  nil)
+
+(defn make-children-fn [chan span]
+  (letfn [(set-span [key-name node]
+            (swap! span assoc key-name (-> node :span deref (get key-name))))
+          (make-children [prev-node]
+            (let [node (async/<!! chan)]
+              (if (identical? node ::stop)
+                (do (set-span :stopIndex prev-node) nil)
+                (cons
+                 node
+                 (lazy-seq
+                  (force! node)
+                  (make-children node))))))]
     (lazy-seq
-     (async/<!! chan))))
+     (let [first-node (async/<!! chan)]
+       (cons
+        first-node
+        (lazy-seq
+         (force! first-node)
+         (set-span :startIndex first-node)
+         (make-children first-node)))))))
+
+(defn make-node-fn
+  ([chan event]
+   (let [span (atom {})]
+     {:head (:ruleName event)
+      :children (make-children-fn chan span)
+      :span span}))
+  ([chan parser ctx]
+   (let [span (atom {})]
+     {:head (rule-name parser ctx)
+      :children (make-children-fn chan span)
+      :span span})))
+
+(defn- visit-terminal-fn
+  [lexer ^TerminalNode node target-type chan]
+  (let [token (.getSymbol node)]
+    (->>
+     {:type target-type
+      :name (token-name token lexer)
+      :value (.getText token)
+      :span (atom
+             {:startIndex (.getStartIndex token)
+              :stopIndex (.getStopIndex token)})}
+     (async/>!! chan))))
+
+(defn parse-source-lazy [lang rule source & {:keys [buffer-size] :or {buffer-size 2}}]
+  (let [{:keys [^Lexer lexer ^Parser parser parse-fn] :as props}
+        (init-parser lang rule source)
+        chan (async/chan buffer-size)]
+    ;; configurate error listeners
+    ;; (configurate-error-listener lexer :lexerError context)
+    ;; (configurate-error-listener parser :parserError context)
+    ;; do not build parse tree
+    (.setBuildParseTree parser false)
+    (.removeParseListeners parser)
+    ;; add parser listener
+    (.addParseListener
+     parser
+     (proxy [ParseTreeListener] []
+       (enterEveryRule [ctx]
+         (println (str "enterEveryRule->" (rule-name parser ctx)))
+         (async/>!! chan (make-node-fn chan parser ctx)))
+       (exitEveryRule [^ParserRuleContext ctx]
+         (println (str "exitEveryRule->" (rule-name parser ctx)))
+         (async/>!! chan ::stop))
+       (visitTerminal [^TerminalNode node]
+         (println (str "visitTerminal->" node))
+         (visit-terminal-fn lexer node :terminalNode chan))
+       (visitErrorNode [^ErrorNode node]
+         (println (str "visitErrorNode->" node))
+         (visit-terminal-fn lexer node :errorNode chan))))
+    ;; async parser
+    (async/<!! (run-parser parse-fn chan))))
+
+(defn test-parse-source-lazy []
+  (let [tree
+        (parse-source-lazy
+         "parser1777893995512"
+         :expression
+         "a + b")]
+    ;; (println "last child->" (last (:children tree)))
+    ;; (force! tree)
+    tree))
 
 (defn test-lazy-tree []
   (let [events
@@ -623,37 +713,59 @@ public class %s extends %s {
          {:type :enterRule
           :ruleName "+"}
          {:type :visitTerminal
-          :value "a1"}
+          :value "a1"
+          :startIndex 0
+          :stopIndex 0}
          {:type :visitTerminal
-          :value "a2"}
+          :value "a2"
+          :startIndex 1
+          :stopIndex 1}
          {:type :exitRule}
          {:type :enterRule
-          :ruleName "+"}
+          :ruleName "+"
+          :startIndex 2
+          :stopIndex 2}
          {:type :visitTerminal
-          :value "b1"}
+          :value "b1"
+          :startIndex 3
+          :stopIndex 3}
          {:type :visitTerminal
-          :value "b2"}
+          :value "b2"
+          :startIndex 4
+          :stopIndex 4}
          {:type :exitRule}
          {:type :exitRule}
          {:type :enterRule
-          :ruleName "-"}
+          :ruleName "-"
+          :startIndex 5
+          :stopIndex 5}
          {:type :visitTerminal
-          :value "c1"}
+          :value "c1"
+          :startIndex 6
+          :stopIndex 6}
          {:type :visitTerminal
-          :value "c2"}
+          :value "c2"
+          :startIndex 7
+          :stopIndex 7}
          {:type :exitRule}
          {:type :enterRule
-          :ruleName "+"}
+          :ruleName "+"
+          :startIndex 8
+          :stopIndex 8}
          {:type :visitTerminal
-          :value "d1"}
+          :value "d1"
+          :startIndex 9
+          :stopIndex 9}
          {:type :visitTerminal
-          :value "d2"}
+          :value "d2"
+          :startIndex 10
+          :stopIndex 10}
          {:type :exitRule}
          {:type :exitRule}]
         tree (make-test-parser events)]
-    (println (str "second-> " (nth tree 2)))
-    tree))
-
-(comment
-  (compile-java-files
-   (fs/list-dir "generated/parser1746822544685")))
+    tree
+    ;; (force! tree)
+    ;; true
+    ;; (println (str "second-> " (nth tree 2)))
+    ;; tree
+    ))
